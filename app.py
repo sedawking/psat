@@ -24,7 +24,11 @@ import streamlit as st
 PAGE_SIZE = int(os.environ.get("PSAT_PAGE_SIZE", 10))
 MIN_SECONDS_BETWEEN_PAGES = float(os.environ.get("PSAT_MIN_PAGE_INTERVAL", 1.5))
 MAX_QS_PER_HOUR = int(os.environ.get("PSAT_MAX_QS_PER_HOUR", 500))
-DATA_FILE = Path(__file__).parent / "all_questions_classified.jsonl"
+ROOT = Path(__file__).parent
+DATA_FILES = [
+    ROOT / "all_questions_classified.jsonl",   # extracted from paper practice tests
+    ROOT / "qbank_questions.jsonl",            # SAT Suite Question Bank (if fetched)
+]
 
 SECTION_ORDER = ["Reading and Writing", "Math"]
 TOPIC_ORDER = {
@@ -51,19 +55,40 @@ st.set_page_config(
 
 
 # ---------------------------- data ----------------------------
+SOURCE_LABELS = {
+    "pdfs": "PSAT Practice Tests",
+    "qbank": "SAT Suite Question Bank",
+}
+
+
 @st.cache_data(show_spinner=False)
-def load_rows(_mtime: float, _size: int) -> list[dict]:
-    """Cache keyed on (file mtime, file size) so a new JSONL invalidates the cache."""
+def load_rows(_cache_key: tuple) -> list[dict]:
+    """Cache keyed on (file mtime, file size) tuples so new JSONLs invalidate.
+    Loads from any available data file and tags each row with a source."""
     rows: list[dict] = []
-    with DATA_FILE.open() as f:
-        for line in f:
-            r = json.loads(line)
-            # choices come in as [[letter, text], ...]; normalize to tuples
-            r["choices"] = [tuple(c) for c in r.get("choices", [])]
-            rows.append(r)
-    # stable sort: tier → test → section → module → number
+    for path in DATA_FILES:
+        if not path.exists():
+            continue
+        with path.open() as f:
+            for line in f:
+                r = json.loads(line)
+                r["choices"] = [tuple(c) for c in r.get("choices", [])]
+                # Normalize the source bucket. (extract.py puts the PDF
+                # filename in `source`; keep it under `source_file` instead
+                # and use a single "pdfs" / "qbank" tag for filtering.)
+                existing_source = r.get("source", "")
+                if path.name == "all_questions_classified.jsonl":
+                    r["source"] = "pdfs"
+                    if existing_source and existing_source != "pdfs":
+                        r.setdefault("source_file", existing_source)
+                else:
+                    r["source"] = "qbank"
+                r.setdefault("programs", [r.get("tier", "")] if r.get("tier") else [])
+                rows.append(r)
+    # Stable sort: source → tier → test → section → module → number.
     rows.sort(
         key=lambda r: (
+            0 if r.get("source") == "pdfs" else 1,
             r.get("tier", ""), r.get("test_id", ""),
             0 if r["section"] == "Reading and Writing" else 1,
             r.get("module", 0), r.get("number", 0),
@@ -73,8 +98,14 @@ def load_rows(_mtime: float, _size: int) -> list[dict]:
 
 
 def _data_cache_key():
-    s = DATA_FILE.stat()
-    return s.st_mtime, s.st_size
+    parts = []
+    for p in DATA_FILES:
+        if p.exists():
+            s = p.stat()
+            parts.append((p.name, s.st_mtime, s.st_size))
+        else:
+            parts.append((p.name, 0, 0))
+    return tuple(parts)
 
 
 # ---------------------------- session ----------------------------
@@ -106,13 +137,19 @@ if "quiz_submitted" not in st.session_state:
 if "quiz_user_answer" not in st.session_state:
     st.session_state.quiz_user_answer = None
 
-rows = load_rows(*_data_cache_key())
+rows = load_rows(_data_cache_key())
 
 
 # ---------------------------- sidebar ----------------------------
 with st.sidebar:
     st.title("📘 PSAT Study Tool")
-    st.caption(f"{len(rows):,} questions across all 8 official practice tests")
+    src_counts = Counter(r.get("source", "pdfs") for r in rows)
+    _caption_parts = []
+    if src_counts.get("pdfs"):
+        _caption_parts.append(f"{src_counts['pdfs']:,} from practice tests")
+    if src_counts.get("qbank"):
+        _caption_parts.append(f"{src_counts['qbank']:,} from SAT Suite Question Bank")
+    st.caption(f"**{len(rows):,}** questions · " + " · ".join(_caption_parts))
     st.markdown("---")
 
     mode = st.radio(
@@ -122,22 +159,62 @@ with st.sidebar:
         key="mode",
     )
 
-    present_tiers = ["All"] + sorted({r.get("tier", "") for r in rows if r.get("tier")})
+    present_sources = sorted({r.get("source", "pdfs") for r in rows})
+    if len(present_sources) > 1:
+        source_opts = ["All"] + [SOURCE_LABELS.get(s, s) for s in present_sources]
+        source_label = st.selectbox("Source", source_opts)
+        source = next(
+            (s for s, label in SOURCE_LABELS.items() if label == source_label),
+            "All" if source_label == "All" else source_label,
+        )
+    else:
+        source = "All"
+
+    source_rows = [r for r in rows if source == "All" or r.get("source") == source]
+
+    # Tier matches if it's in the record's `programs` list (so a question
+    # that appears in both PSAT/NMSQT and PSAT 8/9 shows under either filter).
+    present_tiers = ["All"] + sorted({
+        p for r in source_rows for p in (r.get("programs") or [r.get("tier", "")]) if p
+    })
     tier = st.selectbox("Tier", present_tiers)
 
-    test_rows = [r for r in rows if tier == "All" or r.get("tier") == tier]
-    present_tests = ["All"] + sorted({r.get("test", "") for r in test_rows if r.get("test")})
-    test = st.selectbox("Practice test", present_tests)
+    tier_rows = [
+        r for r in source_rows
+        if tier == "All" or tier in (r.get("programs") or [r.get("tier", "")])
+    ]
+    present_tests = ["All"] + sorted({r.get("test", "") for r in tier_rows if r.get("test")})
+    test = st.selectbox("Practice test / set", present_tests)
 
-    present_sections = ["All"] + [s for s in SECTION_ORDER if any(r["section"] == s for r in test_rows)]
+    present_sections = ["All"] + [s for s in SECTION_ORDER if any(r["section"] == s for r in tier_rows)]
     section = st.selectbox("Section", present_sections)
 
-    module = st.selectbox("Module", ["All", 1, 2])
+    # Module filter only applies to paper-practice-test rows.
+    if source != "qbank":
+        module = st.selectbox("Module", ["All", 1, 2])
+    else:
+        module = "All"
 
-    # Topic / subtopic cascade — scoped to selected section when possible
-    topic_pool = rows
+    # Difficulty filter is only meaningful for question-bank rows (E/M/H).
+    if source != "pdfs":
+        present_diff = sorted({r.get("difficulty", "") for r in tier_rows if r.get("difficulty")})
+        if present_diff:
+            diff_map = {"E": "Easy", "M": "Medium", "H": "Hard"}
+            diff_opts = ["All"] + [diff_map.get(d, d) for d in present_diff]
+            diff_pick = st.selectbox("Difficulty", diff_opts)
+            difficulty = next(
+                (k for k, v in diff_map.items() if v == diff_pick),
+                "All" if diff_pick == "All" else diff_pick,
+            )
+        else:
+            difficulty = "All"
+    else:
+        difficulty = "All"
+
+    # Topic / subtopic cascade — scoped to the already-filtered pool
+    topic_pool = tier_rows
     if section != "All":
-        topic_pool = [r for r in rows if r["section"] == section]
+        topic_pool = [r for r in topic_pool if r["section"] == section]
     present_topics = ["All"]
     if section == "All":
         # offer union of RW + Math topics but preserve order
@@ -174,13 +251,17 @@ q = search.strip().lower()
 
 
 def match(r: dict) -> bool:
-    if tier != "All" and r.get("tier") != tier:
+    if source != "All" and r.get("source") != source:
+        return False
+    if tier != "All" and tier not in (r.get("programs") or [r.get("tier", "")]):
         return False
     if test != "All" and r.get("test") != test:
         return False
     if section != "All" and r["section"] != section:
         return False
     if module != "All" and r.get("module") != module:
+        return False
+    if difficulty != "All" and r.get("difficulty") != difficulty:
         return False
     if topic != "All" and r["topic"] != topic:
         return False
@@ -207,7 +288,7 @@ st.session_state.page = min(max(1, st.session_state.page), total_pages)
 st.markdown("## 📘 PSAT – Practice Test Study Tool")
 
 # Filter signature so Flashcard/Quiz state resets when filters change
-filter_sig = f"{tier}|{test}|{section}|{module}|{topic}|{subtopic}|{fmt}|{q}|{mode}"
+filter_sig = f"{source}|{tier}|{test}|{section}|{module}|{difficulty}|{topic}|{subtopic}|{fmt}|{q}|{mode}"
 if filter_sig != st.session_state.fc_filter_key:
     st.session_state.fc_filter_key = filter_sig
     st.session_state.fc_idx = 0
@@ -295,14 +376,16 @@ def is_correct_spr(user: str, official_answer: str) -> bool:
 def render_question(r: dict, idx: int) -> None:
     qid = _qid(r)
     with st.container(border=True):
-        meta_bits = [
-            f"**{r.get('test','')}**",
-            r["section"],
-            f"Module {r.get('module','?')}",
-            f"Q{r.get('number','?')}",
-            r.get("format", ""),
-            f"_{r.get('topic','')}_",
-        ]
+        is_qbank = r.get("source") == "qbank"
+        meta_bits = [f"**{r.get('test','')}**", r["section"]]
+        if not is_qbank:
+            meta_bits.append(f"Module {r.get('module','?')}")
+        meta_bits.append(f"Q{r.get('number','?')}")
+        if is_qbank and r.get("difficulty"):
+            diff_label = {"E": "Easy", "M": "Medium", "H": "Hard"}.get(r["difficulty"], r["difficulty"])
+            meta_bits.append(diff_label)
+        meta_bits.append(r.get("format", ""))
+        meta_bits.append(f"_{r.get('topic','')}_")
         sub = r.get("subtopic")
         if sub:
             meta_bits.append(f"[{sub}]")
@@ -377,9 +460,12 @@ if mode.startswith("📖") or mode == "Browse":
 
     prev_header = None
     for i, r in enumerate(page_slice):
-        header_key = (r.get("test_id"), r["section"], r.get("module"))
+        header_key = (r.get("source"), r.get("test_id"), r["section"], r.get("module"))
         if header_key != prev_header:
-            st.markdown(f"### {r.get('test','')} — {r['section']} · Module {r.get('module','?')}")
+            if r.get("source") == "qbank":
+                st.markdown(f"### {r.get('test','SAT Suite Question Bank')} — {r['section']}")
+            else:
+                st.markdown(f"### {r.get('test','')} — {r['section']} · Module {r.get('module','?')}")
             prev_header = header_key
         render_question(r, i)
 
@@ -409,9 +495,17 @@ elif mode.startswith("🎴") or mode == "Flashcards":
             st.session_state.fc_idx = 0
             st.session_state.fc_flipped = False
             st.rerun()
-        c_top[3].caption(
-            f"{r.get('test','')} · Module {r.get('module','?')} · Q{r.get('number','?')}"
-        )
+        if r.get("source") == "qbank":
+            diff_label = {"E": "Easy", "M": "Medium", "H": "Hard"}.get(r.get("difficulty",""), "")
+            c_top[3].caption(
+                f"{r.get('test','SAT Suite Qbank')}"
+                + (f" · {diff_label}" if diff_label else "")
+                + f" · Q{r.get('number','?')}"
+            )
+        else:
+            c_top[3].caption(
+                f"{r.get('test','')} · Module {r.get('module','?')} · Q{r.get('number','?')}"
+            )
 
         with st.container(border=True):
             st.caption("QUESTION" if not st.session_state.fc_flipped else "ANSWER")
@@ -525,10 +619,18 @@ elif mode.startswith("✏️") or mode == "Quiz":
 
         # ---------- question card ----------
         with st.container(border=True):
-            st.caption(
-                f"{r.get('test','')} · {r['section']} · Module {r.get('module','?')} · "
-                f"Q{r.get('number','?')} · {r.get('format','')}"
-            )
+            if r.get("source") == "qbank":
+                diff_label = {"E": "Easy", "M": "Medium", "H": "Hard"}.get(r.get("difficulty",""), "")
+                st.caption(
+                    f"{r.get('test','SAT Suite Qbank')} · {r['section']} · "
+                    f"Q{r.get('number','?')} · {r.get('format','')}"
+                    + (f" · {diff_label}" if diff_label else "")
+                )
+            else:
+                st.caption(
+                    f"{r.get('test','')} · {r['section']} · Module {r.get('module','?')} · "
+                    f"Q{r.get('number','?')} · {r.get('format','')}"
+                )
             if r["format"] == "Multiple Choice":
                 st.markdown(f"### {r['question']}")
                 if r.get("choices"):
@@ -696,7 +798,7 @@ st.caption(
     f"Session {st.session_state.sid} · "
     f"{time.strftime('%Y-%m-%d %H:%M:%S')} · "
     f"page {st.session_state.page}/{total_pages} · "
-    f"Source: College Board digital-PSAT practice tests (public domain for study use)"
+    f"Sources: College Board digital-PSAT practice tests + SAT Suite Question Bank (free study use)"
 )
 
 
