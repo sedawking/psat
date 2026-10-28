@@ -62,7 +62,7 @@ SOURCE_LABELS = {
 
 
 @st.cache_data(show_spinner=False)
-def load_rows(_cache_key: tuple) -> list[dict]:
+def load_rows(cache_key: tuple) -> list[dict]:
     """Cache keyed on (file mtime, file size) tuples so new JSONLs invalidate.
     Loads from any available data file and tags each row with a source."""
     rows: list[dict] = []
