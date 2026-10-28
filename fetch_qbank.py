@@ -262,21 +262,42 @@ def main() -> None:
     out_f = OUT.open("a")
     try:
         count = 0
+        skipped = 0
+        consecutive_failures = 0
         for i, meta in enumerate(todo):
             if args.max and count >= args.max:
                 break
             xid = meta["external_id"]
             try:
                 detail = fetch_question(session, xid)
-            except requests.HTTPError as e:
-                print(f"  !! detail {xid}: {e}", file=sys.stderr)
+                consecutive_failures = 0
+            except (requests.HTTPError, requests.ConnectionError,
+                    requests.Timeout) as e:
+                skipped += 1
+                consecutive_failures += 1
+                print(f"  !! skip {xid} after retries: {e}", file=sys.stderr)
+                # Reset the session's connection pool and cool down if we're
+                # getting hammered.
+                if consecutive_failures >= 3:
+                    print(f"  …{consecutive_failures} consecutive failures, "
+                          f"cooling down 60s + rebuilding session",
+                          file=sys.stderr)
+                    time.sleep(60)
+                    session.close()
+                    session = requests.Session()
+                    consecutive_failures = 0
                 continue
             record = to_app_record(meta, detail, sorted(programs_by_id.get(xid, set())))
             out_f.write(json.dumps(record, ensure_ascii=False) + "\n")
             out_f.flush()
             count += 1
             if count % 25 == 0:
-                print(f"  fetched {count}/{len(todo)} ...", flush=True)
+                print(f"  fetched {count}/{len(todo)} (skipped {skipped})",
+                      flush=True)
+            # Every 200 successful fetches, pause briefly to be nicer to the
+            # upstream API.
+            if count and count % 200 == 0:
+                time.sleep(5)
             time.sleep(args.delay)
     finally:
         out_f.close()

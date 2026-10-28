@@ -28,6 +28,12 @@ domains.
 Every question includes the correct answer and, where the College Board
 publishes one, the full answer explanation.
 
+**Plus ~3,200 questions from the College Board SAT Suite Question Bank**
+([satsuitequestionbank.collegeboard.org](https://satsuitequestionbank.collegeboard.org)),
+the official, publicly released digital-PSAT practice item bank. Those come
+with the official difficulty rating (Easy / Medium / Hard) and the official
+skill tags. See `fetch_qbank.py` to pull them locally.
+
 ## Quick start
 
 ```bash
@@ -54,6 +60,17 @@ raw PDFs (which are also in this repo):
 - `classify.py` tags each question with its official SAT-Suite topic and
   sub-skill using keyword rules.
 
+To additionally fetch from the SAT Suite Question Bank:
+
+```bash
+.venv/bin/python3 fetch_qbank.py --programs 100,102   # → qbank_questions.jsonl
+```
+
+That's idempotent — it skips items already on disk, so re-runs resume where
+they left off. The app auto-loads `qbank_questions.jsonl` and exposes a
+**Source** sidebar filter (practice tests vs. question bank) and a
+**Difficulty** filter (Easy / Medium / Hard).
+
 ## Features
 
 - **Browse**: 10 questions per page with topic / subtopic / test / module /
@@ -76,4 +93,6 @@ raw PDFs (which are also in this repo):
 
 All questions, scoring guides, and answer explanations are College Board
 materials from the official PSAT paper-based practice tests
-([psat.org](https://psat.org)).
+([psat.org](https://psat.org)) and the SAT Suite Question Bank
+([satsuitequestionbank.collegeboard.org](https://satsuitequestionbank.collegeboard.org)),
+publicly released by the College Board for free study use.
