@@ -150,26 +150,6 @@ with st.sidebar:
     if src_counts.get("qbank"):
         _caption_parts.append(f"{src_counts['qbank']:,} from SAT Suite Question Bank")
     st.caption(f"**{len(rows):,}** questions · " + " · ".join(_caption_parts))
-
-    # One-shot deploy diagnostic (visible via ?debug=1).
-    try:
-        _dbg = st.query_params.get("debug")
-    except Exception:
-        _dbg = None
-    if _dbg:
-        _dbg_lines = []
-        for p in DATA_FILES:
-            if p.exists():
-                _dbg_lines.append(f"✅ {p.name} ({p.stat().st_size:,} bytes)")
-            else:
-                _dbg_lines.append(f"❌ {p.name} missing")
-        try:
-            _dbg_lines.append(
-                "cwd ls: " + ", ".join(sorted(x.name for x in ROOT.iterdir())[:20])
-            )
-        except Exception as e:
-            _dbg_lines.append(f"iterdir failed: {e}")
-        st.caption("\n\n".join(_dbg_lines))
     st.markdown("---")
 
     mode = st.radio(
