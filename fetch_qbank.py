@@ -91,13 +91,19 @@ def html_to_text(html: str | None) -> str:
 # ---------- API ----------
 
 def _retry_post(session: requests.Session, url: str, payload: dict,
-                attempts: int = 6, base_delay: float = 1.5) -> dict:
-    """POST with exponential backoff on timeouts / 5xx / connection errors."""
+                attempts: int = 5, base_delay: float = 1.5) -> dict:
+    """POST with exponential backoff on timeouts / 5xx / connection errors.
+    Forces Connection: close + drops the connection pool on each retry so
+    stale keep-alive sockets don't get reused."""
     last_exc: Exception | None = None
     for i in range(attempts):
+        # Force a brand new TCP connection every request — the upstream
+        # cloudfront pool is finicky about reusing idle sockets.
+        hdrs = dict(HEADERS)
+        hdrs["Connection"] = "close"
         try:
-            r = session.post(url, json=payload, headers=HEADERS,
-                             verify=False, timeout=45)
+            r = session.post(url, json=payload, headers=hdrs,
+                             verify=False, timeout=20)
             if r.status_code >= 500:
                 raise requests.HTTPError(f"{r.status_code} server error", response=r)
             r.raise_for_status()
@@ -108,7 +114,12 @@ def _retry_post(session: requests.Session, url: str, payload: dict,
             if isinstance(e, requests.HTTPError) and e.response is not None \
                     and 400 <= e.response.status_code < 500:
                 raise
-            sleep_for = base_delay * (2 ** i)
+            # Dump the connection pool so the next request gets a fresh socket.
+            try:
+                session.close()
+            except Exception:
+                pass
+            sleep_for = base_delay * (1.6 ** i)
             print(f"  …retry {i+1}/{attempts} after {sleep_for:.1f}s ({e})",
                   file=sys.stderr)
             time.sleep(sleep_for)
